@@ -1,0 +1,3576 @@
+---
+title: "apoE_cmd_github_240814_CL.Rmd"
+author: "Caroline Lindblad"
+date: "2024-07-14"
+output: html_document
+---
+
+META INFORMATION 
+This code underlies the paper **Influence of Apolipoprotein E genotype on the proteomic profile in cerebral microdialysis after human severe TBI: a prospective observational study**. 
+
+All code was written by the first author of the paper (Caroline Lindblad).
+
+Further questions should be directed to:
+caroline.lindblad@ki.se
+caroline.i.lindblad@gmail.com
+caroline.lindblad@uu.se
+or via telephone
++46708-236282
+
+
+# Wed Aug 14 18:41:14 2024 ------------------------------
+
+
+```{r}
+
+rm(list = ls())
+
+```
+
+
+```{r}
+
+library(gridExtra)
+
+```
+
+
+import sourced script
+```{r}
+
+source("./scripts/script_apoe/idHarmonization_APOE_230828_CL.R")
+
+#the sourced script imports numerous other libraries including tidyverse, ggplot2 
+#the sourced script contains data cleaning operations and preparatory data operations for inferential analysis
+
+```
+
+filter the data so that only one allele is presented (we are only interested in genotype)
+```{r}
+
+vars_to_remove <- c("apoEhaplotype", "allele_number")
+
+apoEstatus_idDf_protq_olink <- apoEstatus_idDf_protq_olink[, !names(apoEstatus_idDf_protq_olink) %in% vars_to_remove]
+
+apoEstatus_idDf_protq_olink <- distinct(apoEstatus_idDf_protq_olink) #the data is reduced to not demonstrate both alleles (thus only genotype)
+
+```
+
+cols of interest for dimensionality reduction techniques
+c(15:106)
+
+```{r}
+
+olink_only <- apoEstatus_idDf_protq_olink[, c(1:8, 10:11, 15:106, 109)] #new 231008
+
+olink_only <- olink_only %>%
+  pivot_wider(names_from = Assay, 
+              values_from = Calc..Concentration) #52 rows
+
+
+olink_only <- distinct(olink_only) 
+
+
+```
+
+new 231008
+```{r}
+
+names(olink_only)
+
+colnames(olink_only)[102]
+colnames(olink_only)[102] <- "IL_1beta"
+
+colnames(olink_only)[103]
+colnames(olink_only)[103] <- "IL_6"
+
+colnames(olink_only)[104]
+colnames(olink_only)[104] <- "IL_8"
+
+colnames(olink_only)[106]
+colnames(olink_only)[106] <- "hu_BDNF"
+
+colnames(olink_only)[107]
+colnames(olink_only)[107] <- "hu_betaNGF"
+
+colnames(olink_only)[108]
+colnames(olink_only)[108] <- "Abeta_38"
+
+colnames(olink_only)[109]
+colnames(olink_only)[109] <- "Abeta_40"
+
+colnames(olink_only)[110]
+colnames(olink_only)[110] <- "Abeta_42"
+
+```
+
+
+export protein key
+```{r}
+
+protein_key <- names(olink_only)[c(9:100, 102:110)]
+
+protein_key <- data.frame(protein_key)
+
+rm(protein_key)
+
+protein_dictionary <- data.frame(olink_metadata$protein_dictionary)
+
+rm(protein_dictionary)
+
+```
+
+
+missing graph depiction
+```{r}
+
+library(naniar)
+library(visdat)
+
+```
+
+visualize missing data across the olink proteins
+source: https://cran.r-project.org/web/packages/visdat/vignettes/using_visdat.html
+source: http://naniar.njtierney.com/articles/getting-started-w-naniar.html#exploring-missingness-relationships
+```{r}
+
+vis_dat(olink_only)
+
+vis_miss(olink_only, sort_miss = T) + ggtitle("Missing data among OLINK proteins")
+
+```
+
+
+```{r}
+
+missing_olink <- miss_var_summary(olink_only[, c(9:100, 102:110)])
+
+```
+
+exclude olink proteins with too extensive missing
+exclusion criterion missing: >=50% missing
+```{r}
+
+missing_olink_cutoff <- missing_olink[missing_olink$pct_miss >= 70, ]
+
+olink_proteins_to_exclude <- missing_olink_cutoff$variable
+
+rm(missing_olink, missing_olink_cutoff)
+
+```
+
+
+```{r}
+
+
+#olink_proteins_to_exclude <- c("BETA_NGF", "CLEC10A", "BMP_4", "NEP", "WFIKKN1", "FC_RL2", "IL_5R_ALPHA", "LAT", "CDH3", "CDH6", "NAAA",
+#                               "PRTG", "GDF_8", "MDGA1", "SIGLEC1", "LXN", "SMPD1", "RSPO1")
+
+
+olink_only <- olink_only[, !names(olink_only) %in% olink_proteins_to_exclude]
+
+rm(olink_proteins_to_exclude)
+
+
+```
+
+
+##new 240714: combine the protein data wih age data
+import data on pat age and sex
+```{r}
+
+pat_meta <- read.csv("./rev1_data/patdf_use_240714_CL.csv", header = T, sep = ";", dec = ",", na.strings = c(NA, ""))
+
+pat_meta <- pat_meta %>%
+  dplyr::select(c(patientID_use, Age, Sex))
+
+str(pat_meta$patientID_use)
+pat_meta$patientID_use <- as.character(pat_meta$patientID_use)
+
+
+```
+
+merge olink_only and pat_meta based on patientID_use
+```{r}
+
+olink_only_r1 <- full_join(pat_meta, olink_only, by = "patientID_use")
+
+dim(olink_only_r1) 
+
+olink_only_r1 <- distinct(olink_only_r1) #new 240715; important
+
+
+```
+
+
+**NEW IMPUTATIONS**
+imputations 
+we will use the mice package
+source: https://rdrr.io/github/stefvanbuuren/mice/f/vignettes/overview.Rmd
+source: https://stefvanbuuren.name/fimd/workflow.html
+other interesting options could be e.g. "simputation" package
+```{r}
+
+library(mice)
+
+imp <- mice(olink_only_r1, maxit = 10, m = 20, seed = 123, print = T)
+
+```
+
+qc imputations
+```{r}
+
+imp$method 
+
+list_imputed <- list()
+
+
+for(i in 1:20){
+ 
+  imputed_data <- complete(imp, i)
+  list_imputed[[paste0("imputation_", i)]] <- imputed_data
+  
+}
+
+
+```
+
+
+```{r}
+
+rm(imp_old, imputed_data_old, list_imputed_old)
+
+```
+
+
+#DIMENSIONALITY REDUCTION TECHNIQUE
+simplistic graphic depiction / tSNE
+https://www.r-bloggers.com/2019/05/quick-and-easy-t-sne-analysis-in-r/
+https://www.geeksforgeeks.org/how-to-make-t-sne-plot-in-r/
+
+```{r}
+
+library(Rtsne)
+
+```
+
+
+one imputation
+```{r}
+
+set.seed(29)
+
+tsne1 <- Rtsne(list_imputed$imputation_1[, c(11:90, 92:100)],
+                dims = 2, 
+                perplexity = 17,
+                check_duplicates = F, 
+                pca = T, 
+                is_distance = F, 
+                theta = 0.0)
+  
+plot(tsne1$Y, col = factor(list_imputed$imputation_1$apoEgenotype), asp = 1)
+
+tsne1_d <- as.data.frame(tsne1$Y)
+  
+p_tsne1_genotype1 <- ggplot(tsne1_d, aes(x = V1, y = V2, col = list_imputed$imputation_1$apoEgenotype)) +
+  geom_point(size = 4.5) +
+  theme_minimal() + 
+  scale_color_manual(values = c("#edf8b1", "#7fcdbb", "#1d91c0", "#253494"),
+                     name = "Genotype") +
+  xlab("Dimension 1") + ylab("Dimension 2") + 
+  ggtitle("tSNE of Olink proteins", subtitle = "depending on SNP status, n = 1 imputation")
+
+
+```
+
+```{r}
+
+rm(tsne1, tsne1_d, p_tsne1_genotype1)
+
+```
+
+generalized solution: for loop
+```{r}
+
+tsne_data <- list()
+
+for(i in 1:20){
+  
+  set.seed(29)
+  
+  interim <- Rtsne(list_imputed[[i]][, c(11:90, 92:100)],
+                dims = 2, 
+                perplexity = 17,
+                check_duplicates = F, 
+                pca = T, 
+                is_distance = F, 
+                theta = 0.0)
+  
+  interim_d <- as.data.frame(interim$Y)
+  
+  tsne_data[[paste0("tsne_imputation_", i)]] <- interim_d
+  
+  
+}
+
+
+d_tsne_mean <- Reduce("+", tsne_data)
+
+d_tsne_mean <- d_tsne_mean/length(tsne_data)
+
+
+```
+
+
+visualize
+```{r}
+
+p_tsne_time <- ggplot(d_tsne_mean, aes(x = V1, y = V2,
+                             col = list_imputed$imputation_1$sample_time)) +
+  geom_point(size = 4.5) +
+  theme_minimal() +
+  scale_color_manual(values = c("#bfd3e6", "#8c6bb1"), labels = c("sample1", "sample2"), 
+                     name = "sampling time") +
+  xlab("Dimension 1") + ylab("Dimension 2") +
+  ggtitle("tSNE of Olink proteins", subtitle = "depending on sampling time, n = 20 imputations")
+
+
+p_tsne_genotype <- ggplot(d_tsne_mean, aes(x = V1, y = V2, col = list_imputed$imputation_1$apoEgenotype)) +
+  geom_point(size = 4.5) +
+  theme_minimal() + 
+  scale_color_manual(values = c("#edf8b1", "#7fcdbb", "#1d91c0", "#253494"),
+                     name = "Genotype") +
+  xlab("Dimension 1") + ylab("Dimension 2") + 
+  ggtitle("tSNE of Olink proteins", subtitle = "depending on SNP status, n = 20 imputations")
+
+
+p_tsne_genotype_time <- ggplot(d_tsne_mean, aes(x = V1, y = V2, col = list_imputed$imputation_1$apoEgenotype)) +
+  geom_point(aes(shape = list_imputed$imputation_1$sample_time), size = 4.5) +
+  theme_minimal() + 
+  scale_color_manual(values = c("#edf8b1", "#7fcdbb", "#1d91c0", "#253494"),
+                     name = "Genotype") +
+  xlab("Dimension 1") + ylab("Dimension 2") + 
+  ggtitle("tSNE of Olink proteins longitudinally", subtitle = "depending on SNP status, n = 20 imputations")
+
+
+
+```
+
+
+```{r}
+
+rm(p_tsne_time, p_tsne_genotype, p_tsne_genotype_time)
+
+rm(tsne_data, interim, imputed_data, interim_d, d_tsne_mean, i, vars_to_remove)
+
+```
+
+#CLUSTERING
+
+**clustering analysis**
+```{r}
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+
+
+```
+
+
+determine number of clusters (one imputation)
+```{r}
+
+#select and scale full data
+
+cluster_d <- list_imputed$imputation_1
+
+rownames(cluster_d) <- paste(cluster_d$Tsample_id, cluster_d$Olink_patientID) 
+
+cluster_d <- cluster_d[, c(11:90, 92:100)]
+
+colnames(cluster_d) <- names(cluster_d)
+
+cluster_d_scale <- scale(cluster_d)
+
+
+```
+
+determine number of clusters (one imputation) cont
+```{r}
+
+#distance calculation
+
+library(cluster)
+library(factoextra)
+
+fviz_dist(get_dist(cluster_d, method = "euclidean", stand = T))
+fviz_dist(get_dist(cluster_d, method = "spearman", stand = T))
+fviz_dist(get_dist(cluster_d, method = "kendall", stand = T))
+
+
+```
+
+determine number of clusters (one imputation) cont
+```{r}
+
+#assess clustering tendency
+
+#use scaled data
+
+fviz_pca_ind(prcomp(scale(cluster_d_scale)), habillage = list_imputed$imputation_1$apoEgenotype, geom = "point", ggtheme = theme_classic()) #no obvious
+
+fviz_pca_ind(prcomp(scale(cluster_d_scale)), habillage = list_imputed$imputation_1$sample_time, geom = "point", ggtheme = theme_classic()) #seems as if there might be clustering
+
+
+```
+
+determine number of clusters (one imputation) cont
+https://www.r-bloggers.com/assessing-clustering-tendency-a-vital-issue-unsupervised-machine-learning/
+https://www.datanovia.com/en/lessons/assessing-clustering-tendency/ <-- here it says that the H threshold is 0.5
+```{r}
+
+#statistical methods to assess clustering tendency
+
+get_clust_tendency(cluster_d_scale, n = nrow(cluster_d_scale) - 1, graph = T) #$hopkins_stat (H): 0.642985 (a little bit lower than the original code)
+
+#maybe worth trying clustering techniques 
+
+```
+
+determine number of clusters (one imputation) cont
+```{r}
+
+library(NbClust)
+
+
+NbClust(cluster_d_scale, distance = "euclidean",
+        min.nc = 2, max.nc = 10, method = "kmeans",
+        index = "tau")
+
+#frey: 1
+#kl, ch, duda, pseudot2, beale, gap, mcclain: 2
+#ptbiserial, tau, ball, hubert(?): 3
+#cindex: 4
+#ratkowsky: 5
+#hartigan, silhouette: 7
+#sdindex, dunn: 9
+#db, sdbw, gamma, gplus: 10
+#dindex: unclear
+
+#ccc, scott, marriot, trcovw, tracew, friedman, rubin does not work
+
+
+#in total n = 30 different clustering algorithms
+#of these, n = 23 works
+
+# of these n = 7 (majority) suggest n = 2 clusters
+# of these n = 4 (second most common) suggest n = 3 or n = 10 clusters
+
+```
+
+validate clustering strategy
+```{r}
+
+set.seed(29)
+
+partCl_2 <- kmeans(cluster_d_scale, 2, nstart = 25)
+fviz_cluster(partCl_2, data = cluster_d_scale, ellipse.type = "convex", ggtheme = theme_minimal())
+#here - the two sampling time points for each patients tend to fall into the same cluster - time might be a meaningful clustering variable
+
+partCl_4 <- kmeans(cluster_d_scale, 3, nstart = 25)
+fviz_cluster(partCl_4, data = cluster_d_scale, ellipse.type = "convex", ggtheme = theme_minimal())
+#240715: here n = 3 clusters seems possibly more meaningful 
+
+```
+
+validate clustering strategy cont
+```{r}
+
+library(clValid)
+
+clmethods <- c("hierarchical", "kmeans", "pam")
+intern <- clValid(cluster_d_scale, nClust = 2:6,
+                  clMethods = clmethods,
+                  validation = "internal")
+
+summary(intern) 
+#suggested strategy: hierarchical clustering, n = 2 clusters
+
+
+```
+
+depict hierarchical clustering
+```{r}
+
+#full data
+#matrix format + scaled
+
+cluster_d_scale[1:5, 1:5]
+
+dist_h1 <- dist(cluster_d_scale, method = "euclidean")
+
+hierCl <- hclust(d = dist_h1, method = "ward.D2")
+
+fviz_dend(hierCl, cex = .5)
+
+f_coph <- cophenetic(hierCl)
+
+cor(dist_h1, f_coph) #0.4413906 (updated)
+
+
+hierCl_2 <- hclust(d = dist_h1, method = "average")
+cor(dist_h1, cophenetic(hierCl_2)) #0.7795342
+
+hierCl_3 <- hclust(d = dist_h1, method = "complete")
+cor(dist_h1, cophenetic(hierCl_3)) #0.5899953
+
+
+#linkage method should be "average" based on above calc
+
+fviz_dend(hierCl_2, cex = 0.5) 
+
+fviz_dend(hierCl_3, cex = 0.5) 
+
+
+f_agnes <- agnes(x = cluster_d_scale,
+                 stand = F,
+                 metric = "euclidean", 
+                 method = "ward")
+
+fviz_dend(f_agnes, cex = 0.5)
+
+f_diana <- diana(x = cluster_d_scale,
+                 stand = F,
+                 metric = "euclidean")
+
+fviz_dend(f_diana, cex = 0.5)
+
+#agnes or hierCl look best graphically
+
+```
+
+```{r}
+
+rm(cluster_d, cluster_d_scale,
+   f_agnes, f_diana, hierCl, hierCl_2, hierCl_3,
+   partCl_2, partCl_4, clmethods,
+   intern,
+   dist_h1, f_coph)
+
+```
+
+generalize cluster determination for all imputations
+```{r}
+
+cluster_d <- list()
+cluster_d_scale <- list()
+
+for(i in 1:20){
+  
+  interim <- list_imputed[[i]]
+  
+  rownames(interim) <- paste(interim$Tsample_id, interim$Olink_patientID)
+  
+  interim <- interim[, c(11:90, 92:100)]
+  
+  colnames(interim) <- names(interim)
+  
+  cluster_d[[paste0("imputation_", i)]] <- interim
+  
+  interim_scale <- scale(interim)
+  
+  cluster_d_scale[[paste0("imputation_", i)]] <- interim_scale
+  
+}
+
+```
+
+for the generalized solution we prioritize among the different analyses
+clustering analyses that are meaningful to do: 
+1. calculation of hopkins statistic 
+
+calculation of hopkins statistic
+```{r}
+
+hopkins <- list()
+
+for(i in 1:20){
+  
+  interim <- get_clust_tendency(cluster_d_scale[[i]], n = nrow(cluster_d_scale[[i]]) - 1, graph = T)
+  
+  hopkins[[paste0("imputation_", i)]] <- interim$hopkins_stat
+  
+}
+
+
+hopkins_mean <- Reduce("+", hopkins)
+
+hopkins_mean <- hopkins_mean/length(hopkins)
+
+hopkins_mean #[1] 0.6493411 (2024-07-15)
+
+#maybe worth trying clustering techniques 
+
+```
+
+```{r}
+
+rm(hopkins, interim, hopkins_mean, i)
+
+```
+
+determine number of clusters generalized utilizing NbClust
+i) run clustering algorithm across imputations
+j) run clustering algorithm across clustering methods 
+```{r}
+
+set.seed(29)
+
+cluster_indices <- c("kl", "ratkowsky", "ptbiserial", "tau", "ch", "duda", "pseudot2", "beale", "gap", "mcclain", "hartigan", 
+                     "cindex", "db", "sdindex", "sdbw", "silhouette", "ball", "frey", "gamma", "gplus", "dunn")
+
+cluster_count <- list()
+
+for(i in names(cluster_d_scale)[1:20]){
+  
+  for(j in cluster_indices[1:21]){
+    
+    
+    interim2 <- NbClust(cluster_d_scale[[i]], distance = "euclidean",
+        min.nc = 2, max.nc = 10, method = "kmeans",
+        index = j)
+  
+  
+    cluster_count[[j]][[i]] <- interim2$Best.nc[1]
+    
+    
+  } 
+  
+  #this syntax works for:
+  #kl, ratkowsky, ptbiserial, tau, ch, duda, pseudot2, beale, gap, mcclain, hartigan
+  #cindex, db, sdindex, sdbw, silhouette, ball, frey, gamma, gplus, dunn
+  
+  #this syntax does NOT work for:
+  #hubert, dindex
+  
+  #the clustering algorithms don't work at all: 
+  ##ccc, scott, marriot, trcovw, tracew, friedman, rubin does not work
+
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+cluster_count_df <- data.frame(unlist(cluster_count))
+
+cluster_count_df$meta <- rownames((cluster_count_df))
+
+cluster_count_df <- cluster_count_df %>%
+  separate(meta, into = c("clusterMethod", "imputation_index", "variable"), sep = "\\.")
+
+names(cluster_count_df)
+
+names(cluster_count_df)[1] <- "value"
+
+
+```
+
+calculate the suggested numbers of clusters from each clustering method
+```{r}
+
+str(cluster_count_df) #value is numerical
+
+cluster_count_df_sum <- cluster_count_df %>%
+  group_by(clusterMethod) %>%
+  summarise(mean_no_of_clusters = mean(value, na.rm = T),
+            median_no_of_clusters = median(value, na.rm = T)
+            )
+
+summary(cluster_count_df_sum)
+
+#21 clusters
+
+table(cluster_count_df_sum$mean_no_of_clusters)
+
+table(cluster_count_df_sum$median_no_of_clusters) #2 clusters: 7 instances (majority). still holds 240715
+
+```
+
+it thus seems likely that we should structure the data into n = 2 clusters if anything
+```{r}
+
+rm(cluster_count_df_sum, cluster_count_df, cluster_count,
+   cluster_indices, i, j, interim2)
+
+
+```
+
+now we have decided the number of clusters (n = 2) - now it makes sense to decide clustering algorithm (hierarchical, kmeans, pam)
+```{r}
+
+library(clValid)
+library(mclust)
+
+clmethods <- c("hierarchical", "kmeans", "diana", "fanny", "model", "sota", "pam", "clara", "agnes")
+
+cl_validation <- list()
+
+for(i in names(cluster_d_scale)[1:20]){
+
+  set.seed(29)
+  
+  interim <- clValid(cluster_d_scale[[i]], nClust = 2:6,
+                  clMethods = clmethods,
+                  validation = "internal")
+
+  cl_validation[[i]] <- interim
+  
+  
+}
+
+
+```
+
+```{r}
+
+summary(cl_validation$imputation_20)
+
+
+#all: hier; n = 2 clusters. 
+
+#evaluated with regard to connectivity, dunn, silhouette score
+
+
+```
+
+```{r}
+
+rm(clmethods, interim, cl_validation, i)
+
+```
+
+graphical depiction clustering
+matrix format (scaled imputations)
+```{r}
+
+distance <- list()
+
+for(i in names(cluster_d_scale)[1:20]){
+  
+  interim <- dist(cluster_d_scale[[i]], method = "euclidean")
+  
+  interim2 <- hclust(d = interim, method = "ward.D2")
+  
+  distance[[i]] <- interim
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+distance$imputation_1 #seems as if col and row names are identical
+
+distance$imputation_12 #seems as if col and row names are identical
+
+distance$imputation_19 #seems as if col and row names are identical
+
+distance_mean <- Reduce("+", distance)
+
+distance_mean
+
+distance_mean <- distance_mean/length(distance)
+
+distance_mean
+
+```
+
+```{r}
+
+hier_cluster <- hclust(d = distance_mean, method = "ward.D2")
+
+fviz_dend(hier_cluster, cex = .5)
+
+f_coph <- cophenetic(hier_cluster)
+
+cor(distance_mean, f_coph) 
+
+
+#new corr 240715 (ward.D2): [1] 0.4677026
+
+
+```
+
+```{r}
+
+rm(distance, distance_mean, hier_cluster, f_coph, interim, interim2, i)
+
+```
+
+#HEATMAP
+visualize heatmap (one imputation)
+```{r}
+
+set.seed(29)
+
+#pending clustering
+hierCl_use <- hcut(cluster_d$imputation_1, k = 2, hc_func = "hclust", hc_method = "ward.D2", hc_metric = "euclidean", stand = T) 
+
+
+#add categories
+col <- list(genotype = c("e4/e3" = "#1d91c0", "e3/e3" = "#7fcdbb", "e3/e2" = "#edf8b1", "e4/e4" = "#253494"),
+           sample_time = c("d1" = "#bfd3e6", "d3" = "#8c6bb1"))
+
+
+#individuals as rows
+ra <- rowAnnotation(
+  genotype = list_imputed$imputation_1$apoEgenotype,
+  sample_time = list_imputed$imputation_1$sample_time,
+  patient_ID = list_imputed$imputation_1$Olink_patientID,
+  col = col
+)
+
+
+hm_imp1 <- Heatmap(scale(list_imputed$imputation_1[, c(11:90, 92:100)]),
+                   name = "scaled protein levels",
+                   column_title = "Proteins",
+                   column_names_gp = gpar(fontsize = 5),
+                   show_column_dend = T,
+                   show_row_dend =  T,
+                   right_annotation = ra
+                   #, split = hierCl_use$cluster
+                   )
+
+
+draw(hm_imp1) ; row_order(hm_imp1)
+
+```
+
+source: https://rdrr.io/bioc/ComplexHeatmap/man/row_order-Heatmap-method.html
+
+verify that individual patient rows can be identified accurately
+```{r}
+
+row_indices_test <- as.numeric(as.character(row_order(hm_imp1))) #core function row_order
+
+row_indices_id <- list_imputed$imputation_1$Olink_patientID[row_indices_test]
+
+test_matrix <- hm_imp1@matrix
+
+class(test_matrix)
+
+test_test_matrix <- as.data.frame(test_matrix)
+
+test_test_matrix$Olink_patientID <- row_indices_id
+
+```
+
+remove redundant code
+```{r}
+
+rm(cluster_d, cluster_d_scale, col, hierCl_use, hm_imp1, interim_scale, ra, test_matrix, test_test_matrix, 
+   row_indices_id, row_indices_test)
+
+```
+
+##access the underlying data: hm_imp1@matrix --> maybe pool as for tsne?
+##generalize and pool heatmaps
+```{r}
+
+hm_imp_p <- list()
+hm_imp_d <- list()
+row_number <- list()
+
+
+for(i in 1:20){
+  
+  set.seed(29)
+  
+  #add categories
+  col <- list(genotype = c("e4/e3" = "#1d91c0", "e3/e3" = "#7fcdbb", "e3/e2" = "#edf8b1", "e4/e4" = "#253494"),
+           sample_time = c("d1" = "#bfd3e6", "d3" = "#8c6bb1"))
+
+
+  #individuals as rows
+  ra <- rowAnnotation(
+    genotype = list_imputed[[i]]$apoEgenotype,
+    sample_time = list_imputed[[i]]$sample_time,
+    patient_ID = list_imputed[[i]]$Olink_patientID,
+    col = col
+  )
+
+  
+  interim <- Heatmap(scale(list_imputed[[i]][, c(11:90, 92:100)]),
+                   name = "scaled OLINK levels",
+                   column_title = "OLINK proteins",
+                   column_names_gp = gpar(fontsize = 5),
+                   show_column_dend = T,
+                   show_row_dend =  T,
+                   right_annotation = ra
+                   )
+  
+  interim_d <- interim@matrix
+  
+  hm_imp_p[[paste0("heatmap_imputation_", i)]] <- interim
+  
+  hm_imp_d[[paste0("heatmap_imputation_", i)]] <- interim_d 
+  
+  row_number[[paste0("heatmap_imputation_", i)]] <- row_order(hm_imp_p[[paste0("heatmap_imputation_", i)]])
+  
+}
+
+
+
+```
+
+add Olink_patientID
+```{r}
+
+str(row_number$heatmap_imputation_1) #int
+
+hm_imp_df <- list()
+
+
+for(i in 1:20){
+  
+  interim <- list_imputed[[i]]$Olink_patientID[row_number[[i]]]
+  
+  
+  interim2 <- as.data.frame(hm_imp_d[[i]]) 
+  
+  interim2$Olink_patientID <- interim
+  
+  interim2$imputation_index <- rep(i, length.out = dim(interim2)[1])
+  
+  
+  hm_imp_df[[paste0("heatmap_imputation_", i)]] <- interim2
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+
+hm_imp_df_all <- bind_rows(hm_imp_df)
+
+```
+
+calculate mean
+```{r}
+
+hm_imp_df_all_sum <- hm_imp_df_all %>%
+  group_by(Olink_patientID) %>%
+  summarise(across(NMNAT1:Abeta_42, \(x) mean(x, na.rm = T)))
+
+
+```
+
+merge imputed and pooled heatmap data with the other metadata
+```{r}
+
+meta_vars <- names(olink_only_r1)[c(1:10, 91)]
+
+olink_only_r1_subset <- olink_only_r1[, meta_vars]
+
+hm_imp_df_all_sum_meta <- full_join(hm_imp_df_all_sum, olink_only_r1_subset, by = "Olink_patientID")
+
+```
+
+```{r}
+
+set.seed(29)
+  
+  #add categories
+  col <- list(genotype = c("e4/e3" = "#1d91c0", "e3/e3" = "#7fcdbb", "e3/e2" = "#edf8b1", "e4/e4" = "#253494"),
+           sample_time = c("d1" = "#bfd3e6", "d3" = "#8c6bb1"))
+
+
+  #individuals as rows
+  ra <- rowAnnotation(
+    genotype = hm_imp_df_all_sum_meta$apoEgenotype,
+    sample_time = hm_imp_df_all_sum_meta$sample_time,
+    patient_ID = hm_imp_df_all_sum_meta$Olink_patientID,
+    col = col
+  )
+
+
+hm_pooled <- Heatmap(scale(hm_imp_df_all_sum_meta[, c(2:90)]),
+                   name = "scaled, imputed OLINK levels",
+                   column_title = "OLINK proteins",
+                   column_names_gp = gpar(fontsize = 5),
+                   show_column_dend = T,
+                   show_row_dend =  T,
+                   right_annotation = ra
+                   )
+
+draw(hm_pooled)
+
+
+```
+
+```{r}
+
+rm(col, hm_imp_d, hm_imp_df, hm_imp_df_all, hm_imp_df_all_sum, hm_imp_df_all_sum_meta, hm_imp_p, hm_pooled,
+   interim_d, interim2, i, interim, meta_vars, row_number, ra)
+
+```
+
+
+#REGRESSION ANALYSES
+in older version of this script regular linear regression analyses were included
+this has been omitted now as iid criteria is not met
+
+this code chunk has been moved to the top of this section
+```{r}
+
+##flatten list code
+#source: https://stackoverflow.com/questions/55731855/how-to-extract-every-ggplot2-plot-from-a-nested-list
+FlattenListofGgplot <- function(x){
+  morelists <- sapply(x, function(xprime){
+    "list" %in% class(xprime) & !("gg" %in% class(xprime))
+  })
+  
+  out <- c(x[!morelists], unlist(x[morelists], recursive = F))
+  
+  if(sum(morelists)){
+    Recall(out)
+  }
+  else{
+    return(out)
+  }
+  
+}
+
+
+
+```
+
+
+prep data - new 231031 starts
+Ratio Abeta42/40 regression to apoe/time
+```{r}
+
+list_imputed_ratio <- list()
+
+for(i in names(list_imputed)[1:20]){
+  
+  interim <- list_imputed[[i]] %>%
+    group_by(Tsample_id, Olink_patientID) %>%
+    mutate(Abeta42_40_ratio = Abeta_42/Abeta_40)
+  
+  list_imputed_ratio[[i]] <- interim
+  
+}
+
+
+
+```
+
+
+prep data
+```{r}
+
+list_imputed_long <- list()
+
+
+for(i in names(list_imputed_ratio)[1:20]){
+  
+  interim <- list_imputed_ratio[[i]] %>%
+    group_by(Tsample_id, Olink_patientID) %>%
+    pivot_longer(cols = c(NMNAT1:KYNU, IL_1beta:Abeta42_40_ratio), 
+               names_to = "olink_protein",
+               values_to = "value")
+  
+  list_imputed_long[[i]] <- interim
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+rm(list_imputed_ratio)
+
+```
+
+prep data
+```{r}
+
+#create var "apoE_e4_carrier"
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  interim <- if_else(grepl("e4", list_imputed_long[[i]]$apoEgenotype), 1, 0)
+  
+  list_imputed_long[[i]]$apoE_e4_carrier <- interim
+  
+}
+
+
+```
+
+prep data
+```{r}
+
+olink_protein_names <- unique(list_imputed_long$imputation_1$olink_protein)
+
+```
+
+MIXED MODELS
+
+
+```{r}
+library(nlme)
+
+```
+
+
+MIXED MODELS (UNIVARIATE: AGE)
+```{r}
+
+age_univar_mimo <- list()
+age_univar_mimo_p <- list()
+age_univar_mimo_coef <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ Age, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    age_univar_mimo[[j]][[i]] <- interim2
+    
+    age_univar_mimo_p[[j]][[i]] <- interim2$tTable[10]
+    
+    age_univar_mimo_coef[[j]][[i]] <- interim2$tTable[2]
+  
+  }
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+age_univar_mimo_df <- data.frame(unlist(age_univar_mimo_p))
+age_univar_mimo_coef_df <- data.frame(unlist(age_univar_mimo_coef))
+
+table(age_univar_mimo_df$unlist.age_univar_mimo_p. <= 0.05) #T: 84 
+
+```
+
+generalized solution reg assumptions
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        
+        model <- lme(value ~ Age, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+  
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+```
+
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+
+```{r}
+
+age_univar_mimo_coef_df$meta <- rownames(age_univar_mimo_coef_df)
+
+age_univar_mimo_df$meta <- rownames(age_univar_mimo_df)
+
+age_univar_mimo_df <- full_join(age_univar_mimo_df, age_univar_mimo_coef_df, by = "meta")
+
+
+age_univar_mimo_df <- age_univar_mimo_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(age_univar_mimo_df)
+
+names(age_univar_mimo_df)[1] <- "p_age_unadj"
+names(age_univar_mimo_df)[4] <- "coef_age"
+
+age_univar_mimo_df <- age_univar_mimo_df %>%
+  group_by(olink_protein) %>%
+  summarise(across(c(p_age_unadj, coef_age), list(mean = ~ mean(.x, na.rm = T))))
+    
+age_univar_mimo_df$p_age_adj <- p.adjust(age_univar_mimo_df$p_age_unadj_mean, method = "BH")
+
+age_univar_mimo_df_sign <- age_univar_mimo_df %>%
+  filter(p_age_unadj_mean <= 0.05) 
+
+View(age_univar_mimo_df_sign) 
+
+age_univar_mimo_df_sign <- age_univar_mimo_df_sign[, c(1, 3, 2, 4)]
+
+
+```
+
+
+```{r}
+
+rm(age_univar_mimo, age_univar_mimo_df_sign, age_univar_mimo, age_univar_mimo_p)
+
+```
+
+ADDITIVE ANALYSIS: AGE
+```{r}
+
+library(nlme)
+
+rev1_df_age <- list()
+rev1_p_age <- list()
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier + Age, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    rev1_df_age[[j]][[i]] <- interim2
+    
+    rev1_p_age[[j]][[i]] <- interim2$tTable[15]
+    
+    
+  }
+  
+  
+}
+
+
+
+```
+
+POOL AGE ANALYSIS
+```{r}
+
+rev1_p_age_df <- data.frame(unlist(rev1_p_age))
+
+rev1_p_age_df$meta <- rownames(rev1_p_age_df)
+
+rev1_p_age_df <- rev1_p_age_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+names(rev1_p_age_df)[1] <- "p_rev1_age"
+
+rev1_p_age_df <- rev1_p_age_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_rev1_age_unadj_mean = mean(p_rev1_age, na.rm = T))
+
+rev1_p_age_df$p_rev1_age_adj <- p.adjust(rev1_p_age_df$p_rev1_age_unadj_mean, method = "BH")
+
+
+```
+
+```{r}
+
+rm(rev1_p_age_df, rev1_p_age, rev1_p_age_df, rev1_df_age)
+
+```
+
+
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        model <- lme(value ~ apoE_e4_carrier + Age, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+          
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+MIXED MODELS (UNIVARIATE: SEX)
+```{r}
+
+sex_univar_mimo <- list()
+sex_univar_mimo_p <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ Sex, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    sex_univar_mimo[[j]][[i]] <- interim2
+    
+    sex_univar_mimo_p[[j]][[i]] <- interim2$tTable[10]
+  
+  }
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+sex_univar_mimo_df <- data.frame(unlist(sex_univar_mimo_p))
+
+table(sex_univar_mimo_df$unlist.sex_univar_mimo_p. <= 0.05) #T: 5 
+
+```
+
+
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        model <- lme(value ~ Sex, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+  
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+      
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+
+```{r}
+
+sex_univar_mimo_df$meta <- rownames(sex_univar_mimo_df)
+
+sex_univar_mimo_df <- sex_univar_mimo_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(sex_univar_mimo_df)
+
+names(sex_univar_mimo_df)[1] <- "p_univar_unadj"
+
+sex_univar_mimo_df <- sex_univar_mimo_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_univar_unadj_mean = mean(p_univar_unadj, na.rm = T))
+
+sex_univar_mimo_df$p_univar_adj <- p.adjust(sex_univar_mimo_df$p_univar_unadj_mean, method = "BH")
+
+sex_univar_mimo_df_sign <- sex_univar_mimo_df %>%
+  filter(p_univar_unadj_mean <= 0.05) 
+
+sex_univar_mimo_df_sign #empty
+
+
+```
+
+```{r}
+
+rm(sex_univar_mimo, sex_univar_mimo_df_sign, sex_univar_mimo, sex_univar_mimo_p)
+
+```
+
+
+ADDITIVE ANALYSIS: SEX
+```{r}
+
+library(nlme)
+
+rev1_df_sex <- list()
+rev1_p_sex <- list()
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier + Sex, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    rev1_df_sex[[j]][[i]] <- interim2
+    
+    rev1_p_sex[[j]][[i]] <- interim2$tTable[15]
+    
+    
+  }
+  
+  
+}
+
+
+
+```
+
+POOL SEX ANALYSIS
+```{r}
+
+rev1_p_sex_df <- data.frame(unlist(rev1_p_sex))
+
+rev1_p_sex_df$meta <- rownames(rev1_p_sex_df)
+
+rev1_p_sex_df <- rev1_p_sex_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+names(rev1_p_sex_df)[1] <- "p_rev1_sex"
+
+rev1_p_sex_df <- rev1_p_sex_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_rev1_sex_unadj_mean = mean(p_rev1_sex, na.rm = T))
+
+rev1_p_sex_df$p_rev1_sex_adj <- p.adjust(rev1_p_sex_df$p_rev1_sex_unadj_mean, method = "BH")
+
+
+```
+
+
+```{r}
+
+rm(rev1_p_sex_df, rev1_p_sex, rev1_p_sex_df, rev1_df_sex)
+
+```
+
+
+generalized solution - regression assumptions
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        model <- lme(value ~ apoE_e4_carrier + Sex, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+        
+        #original_out[[j]][[i]] <- original_data
+        #model_out[[j]][[i]] <- model
+        
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+          
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+
+MIXED MODELS (INTERACTION)
+```{r}
+
+library(nlme)
+
+univar_mimo <- list()
+
+univar_mimo_coef_apoE_e4_carrier <- list()
+univar_mimo_p_apoE_e4_carrier <- list()
+
+univar_mimo_coef_time <- list()
+univar_mimo_p_sample_time <- list()
+
+univar_mimo_coef_interaction <- list()
+univar_mimo_p_interaction <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier * sample_time, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    univar_mimo[[j]][[i]] <- interim2
+    
+    univar_mimo_coef_apoE_e4_carrier[[j]][[i]] <- interim2$tTable[2]
+    univar_mimo_p_apoE_e4_carrier[[j]][[i]] <- interim2$tTable[18]
+    
+    univar_mimo_coef_time[[j]][[i]] <- interim2$tTable[3]
+    univar_mimo_p_sample_time[[j]][[i]] <- interim2$tTable[19]
+    
+    univar_mimo_coef_interaction[[j]][[i]] <- interim2$tTable[4]
+    univar_mimo_p_interaction[[j]][[i]] <- interim2$tTable[20]
+    
+  
+  }
+  
+  
+}
+
+
+```
+
+
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+          
+        model <- lme(value ~ apoE_e4_carrier * sample_time, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+        
+        #original_out[[j]][[i]] <- original_data
+        #model_out[[j]][[i]] <- model
+        
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+      
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        
+        library(forecast)
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+      
+      
+
+  
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+```{r}
+
+univar_mimo_apoE_e4_carrier_p_df <- data.frame(unlist(univar_mimo_p_apoE_e4_carrier))
+
+#some imputations seem significant
+
+univar_mimo_sampletime_p_df <- data.frame(unlist(univar_mimo_p_sample_time))
+
+univar_mimo_interaction_p_df <- data.frame(unlist(univar_mimo_p_interaction))
+
+univar_mimo_coef_apoE_e4_carrier_df <- data.frame(unlist(univar_mimo_coef_apoE_e4_carrier))
+
+univar_mimo_coef_time_df <- data.frame(unlist(univar_mimo_coef_time))
+
+univar_mimo_coef_interaction_df <- data.frame(unlist(univar_mimo_coef_interaction))
+
+```
+
+
+```{r}
+
+univar_mimo_apoE_e4_carrier_p_df$meta <- rownames(univar_mimo_apoE_e4_carrier_p_df)
+
+univar_mimo_sampletime_p_df$meta <- rownames(univar_mimo_sampletime_p_df)
+
+univar_mimo_interaction_p_df$meta <- rownames(univar_mimo_interaction_p_df)
+
+univar_mimo_coef_apoE_e4_carrier_df$meta <- rownames(univar_mimo_coef_apoE_e4_carrier_df)
+
+univar_mimo_coef_time_df$meta <- rownames(univar_mimo_coef_time_df)
+
+univar_mimo_coef_interaction_df$meta <- rownames(univar_mimo_coef_interaction_df)
+
+```
+
+
+```{r}
+
+tables5_1 <- full_join(univar_mimo_coef_apoE_e4_carrier_df, univar_mimo_apoE_e4_carrier_p_df, by = "meta")
+
+tables5_2 <- full_join(univar_mimo_coef_time_df, univar_mimo_sampletime_p_df, by = "meta")
+
+tables5_3 <- full_join(univar_mimo_coef_interaction_df, univar_mimo_interaction_p_df, by = "meta")
+
+tables5_4 <- full_join(tables5_1, tables5_2, by = "meta")
+
+tables5 <- full_join(tables5_3, tables5_4, by = "meta")
+
+rm(tables5_1, tables5_2, tables5_3, tables5_4)
+
+```
+
+
+```{r}
+
+tables5 <- tables5 %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+names(tables5)[1] <- "coef_interaction"
+names(tables5)[2] #olink protein
+names(tables5)[3] #imputation_index
+names(tables5)[4] <- "p_interaction"
+names(tables5)[5] <- "coef_apoeE4_carrier"
+names(tables5)[6] <- "p_apoeE4_carrier"
+names(tables5)[7] <- "coef_time_from_trauma"
+names(tables5)[8] <- "p_time_from_trauma"
+
+```
+
+```{r}
+
+tables5_summary <- tables5 %>%
+  group_by(olink_protein) %>%
+  summarise(across(c(coef_interaction, p_interaction:p_time_from_trauma), 
+                   list(mean = ~ mean(.x, na.rm = T)))
+            )
+
+
+```
+
+```{r}
+
+tables5_summary$p_interaction_mean_adjusted <- p.adjust(tables5_summary$p_interaction_mean, method = "BH")
+
+tables5_summary_sign <- tables5_summary %>%
+  filter(p_interaction_mean <= 0.05)
+
+View(tables5_summary_sign)
+
+tables5_summary_sign <- tables5_summary_sign[, c(1:3, 8, 4:7)]
+
+
+
+```
+
+
+
+```{r}
+
+rm(interim, interim2, 
+   univar_mimo_apoE_e4_carrier_p_df, univar_mimo_apoE_e4_carrier_p_df_sign, univar_mimo_p_apoE_e4_carrier,
+   i, j)
+
+```
+
+
+graphical illustration
+```{r}
+
+violin_data_interaction <- list()
+
+olink_interaction_violin <- unique(tables5_summary_sign$olink_protein)
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_interaction_violin[1:2]){
+    
+      interim <- list_imputed_long[[i]] %>%
+        filter(olink_protein == j)
+      
+      violin_data_interaction[[j]][[i]] <- interim
+      
+      violin_data_interaction[[j]][[i]]$imputation_index <- i 
+    
+  }
+  
+}
+
+```
+
+```{r}
+
+rm(interim)
+
+```
+
+```{r}
+
+violin_merge_data_interaction <- list()
+violin_interaction_plot <- list()
+
+for(i in olink_interaction_violin[1:2]){
+  
+  interim <- bind_rows(violin_data_interaction[[i]])
+  
+  interim2 <- interim %>%
+    group_by(Social.Security.Number, sample_time) %>%
+    mutate(mean_value = mean(value, na.rm = T))
+  
+  interim2 <- interim2 %>%
+    dplyr::select(-imputation_index)
+  
+  interim2 <- distinct(interim2)
+  
+  violin_merge_data_interaction[[i]] <- interim2
+
+  interim_plot <- ggplot(interim2, aes(as.character(apoE_e4_carrier), mean_value, fill = sample_time)) +
+  geom_violin(width = .75, alpha = .2, position = position_dodge(width = 0.75)) +
+  geom_boxplot(width = .2, color = "grey", alpha = .4, position = position_dodge(width = 0.75)) +
+  geom_point(pch = 21, size = 4, position = position_jitterdodge(jitter.width = .3)) +
+  theme_linedraw() +
+  xlab("APOE e4 carrier") + ylab("Protein quantification level") + ggtitle(paste0("OLINK protein: ", i))
+  
+  violin_interaction_plot[[i]] <- interim_plot
+  
+  
+}
+
+
+```
+
+
+```{r}
+
+library(cowplot)
+
+grid <- plot_grid(violin_interaction_plot$CLM_1,
+                  violin_interaction_plot$GFR_ALPHA_1,
+                  nrow = 1)
+
+
+
+```
+
+prep data for additive model
+```{r}
+
+olink_protein_names_add <- olink_protein_names
+
+```
+
+remove redundant data
+```{r}
+
+rm(interim, interim_plot, interim2, univar_mimo, univar_mimo_apoE_e4_carrier_p_df, 
+   univar_mimo_interaction_p_df, univar_mimo_interaction_p_df_sign, univar_mimo_p_apoE_e4_carrier,
+   univar_mimo_p_interaction, univar_mimo_p_sample_time, violin_data_interaction, violin_interaction_plot,
+   violin_merge_data_interaction, i, j, olink_interaction_violin, univar_mimo_sampletime_p_df)
+
+```
+MIXED MODELS (INTERACTION, adjusted for Age)
+```{r}
+
+library(nlme)
+
+univar_mimo <- list()
+univar_mimo_p_apoE_e4_carrier <- list()
+univar_mimo_p_sample_time <- list()
+univar_mimo_p_interaction <- list()
+univar_mimo_p_age <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier * sample_time + Age, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    univar_mimo[[j]][[i]] <- interim2
+    
+    univar_mimo_p_apoE_e4_carrier[[j]][[i]] <- interim2$tTable[22]
+    
+    univar_mimo_p_sample_time[[j]][[i]] <- interim2$tTable[23]
+    
+    univar_mimo_p_age[[j]][[i]] <- interim2$tTable[24]
+    
+    univar_mimo_p_interaction[[j]][[i]] <- interim2$tTable[25]
+    
+  
+  }
+  
+  
+}
+
+
+```
+
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        model <- lme(value ~ apoE_e4_carrier * sample_time + Age, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+      
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        library(forecast)
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+      
+      
+
+  
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+save all files
+231021: this has been done previously and is therefore marked "#"
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+```
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+```{r}
+
+univar_mimo_apoE_e4_carrier_p_df <- data.frame(unlist(univar_mimo_p_apoE_e4_carrier))
+
+#some imputations seem significant
+
+univar_mimo_sampletime_p_df <- data.frame(unlist(univar_mimo_p_sample_time))
+
+univar_mimo_interaction_p_df <- data.frame(unlist(univar_mimo_p_interaction))
+
+univar_mimo_age_p_df <- data.frame(unlist(univar_mimo_p_age))
+
+```
+
+apoE e4
+```{r}
+
+univar_mimo_apoE_e4_carrier_p_df$meta <- rownames(univar_mimo_apoE_e4_carrier_p_df)
+
+univar_mimo_apoE_e4_carrier_p_df <- univar_mimo_apoE_e4_carrier_p_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(univar_mimo_apoE_e4_carrier_p_df)
+
+names(univar_mimo_apoE_e4_carrier_p_df)[1] <- "p_apoe4_unadj"
+
+univar_mimo_apoE_e4_carrier_p_df <- univar_mimo_apoE_e4_carrier_p_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_apoe4_unadj_mean = mean(p_apoe4_unadj, na.rm = T))
+
+univar_mimo_apoE_e4_carrier_p_df$p_apoe4_adj <- p.adjust(univar_mimo_apoE_e4_carrier_p_df$p_apoe4_unadj_mean, method = "BH")
+
+univar_mimo_apoE_e4_carrier_p_df_sign <- univar_mimo_apoE_e4_carrier_p_df %>%
+  filter(p_apoe4_unadj_mean <= 0.05)
+
+univar_mimo_apoE_e4_carrier_p_df_sign
+
+
+
+```
+
+age
+```{r}
+
+univar_mimo_age_p_df$meta <- rownames(univar_mimo_age_p_df)
+
+univar_mimo_age_p_df <- univar_mimo_age_p_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(univar_mimo_age_p_df)
+
+names(univar_mimo_age_p_df)[1] <- "p_age_unadj"
+
+univar_mimo_age_p_df <- univar_mimo_age_p_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_age_unadj_mean = mean(p_age_unadj, na.rm = T))
+
+univar_mimo_age_p_df$p_age_adj <- p.adjust(univar_mimo_age_p_df$p_age_unadj_mean, method = "BH")
+
+univar_mimo_age_p_df_sign <- univar_mimo_age_p_df %>%
+  filter(p_age_unadj_mean <= 0.05)
+
+univar_mimo_age_p_df_sign
+
+
+
+```
+
+
+```{r}
+
+rm(interim, interim2, 
+   univar_mimo_apoE_e4_carrier_p_df, univar_mimo_apoE_e4_carrier_p_df_sign, univar_mimo_p_apoE_e4_carrier,
+   i, j,
+   univar_mimo_age_p_df, univar_mimo_age_p_df_sign, univar_mimo_p_age)
+
+```
+
+
+interaction effect
+```{r}
+
+univar_mimo_interaction_p_df$meta <- rownames(univar_mimo_interaction_p_df)
+
+univar_mimo_interaction_p_df <- univar_mimo_interaction_p_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(univar_mimo_interaction_p_df)
+
+names(univar_mimo_interaction_p_df)[1] <- "p_interaction_unadj"
+
+univar_mimo_interaction_p_df <- univar_mimo_interaction_p_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_interaction_unadj_mean = mean(p_interaction_unadj, na.rm = T))
+
+univar_mimo_interaction_p_df$p_interaction_adj <- p.adjust(univar_mimo_interaction_p_df$p_interaction_unadj_mean, method = "BH") #do not use
+
+univar_mimo_interaction_p_df_sign <- univar_mimo_interaction_p_df %>%
+  filter(p_interaction_unadj_mean <= 0.05)
+
+univar_mimo_interaction_p_df_sign
+
+
+
+```
+
+graphical illustration
+```{r}
+
+violin_data_interaction <- list()
+
+olink_interaction_violin <- unique(univar_mimo_interaction_p_df_sign$olink_protein)
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_interaction_violin[1:2]){
+    
+      interim <- list_imputed_long[[i]] %>%
+        filter(olink_protein == j)
+      
+      violin_data_interaction[[j]][[i]] <- interim
+      
+      violin_data_interaction[[j]][[i]]$imputation_index <- i 
+    
+  }
+  
+}
+
+```
+
+```{r}
+
+rm(interim)
+
+```
+
+```{r}
+
+violin_merge_data_interaction <- list()
+violin_interaction_plot <- list()
+
+for(i in olink_interaction_violin[1:2]){
+  
+  interim <- bind_rows(violin_data_interaction[[i]])
+  
+  interim2 <- interim %>%
+    group_by(Social.Security.Number, sample_time) %>%
+    mutate(mean_value = mean(value, na.rm = T))
+  
+  interim2 <- interim2 %>%
+    dplyr::select(-imputation_index)
+  
+  interim2 <- distinct(interim2)
+  
+  violin_merge_data_interaction[[i]] <- interim2
+
+  interim_plot <- ggplot(interim2, aes(as.character(apoE_e4_carrier), mean_value, fill = sample_time)) +
+  geom_violin(width = .75, alpha = .2, position = position_dodge(width = 0.75)) +
+  geom_boxplot(width = .2, color = "grey", alpha = .4, position = position_dodge(width = 0.75)) +
+  geom_point(pch = 21, size = 4, position = position_jitterdodge(jitter.width = .3)) +
+  theme_linedraw() +
+  xlab("APOE e4 carrier") + ylab("Protein quantification level") + ggtitle(paste0("OLINK protein: ", i))
+  
+  violin_interaction_plot[[i]] <- interim_plot
+  
+  
+}
+
+
+```
+
+
+```{r}
+
+library(cowplot)
+
+grid <- plot_grid(violin_interaction_plot$CLM_1,
+                  violin_interaction_plot$GFR_ALPHA_1,
+                  nrow = 1)
+
+
+
+```
+
+prep data for additive model
+```{r}
+
+olink_protein_names_add <- olink_protein_names
+
+```
+
+remove redundant data
+```{r}
+
+rm(interim, interim_plot, interim2, univar_mimo, univar_mimo_apoE_e4_carrier_p_df, 
+   univar_mimo_interaction_p_df, univar_mimo_interaction_p_df_sign, univar_mimo_p_apoE_e4_carrier,
+   univar_mimo_p_interaction, univar_mimo_p_sample_time, violin_data_interaction, violin_interaction_plot,
+   violin_merge_data_interaction, i, j, olink_interaction_violin, univar_mimo_sampletime_p_df)
+
+```
+
+MIXED MODELS (ADDITIVE)
+```{r}
+
+add_mimo <- list()
+add_mimo_p_apoE_e4_carrier <- list()
+add_mimo_p_sample_time <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names_add[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier + sample_time, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    add_mimo[[j]][[i]] <- interim2
+    
+    add_mimo_p_apoE_e4_carrier[[j]][[i]] <- interim2$tTable[14]
+    
+    add_mimo_p_sample_time[[j]][[i]] <- interim2$tTable[15]
+    
+  
+  }
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+add_mimo_apoE_df <- data.frame(unlist(add_mimo_p_apoE_e4_carrier))
+table(add_mimo_apoE_df$unlist.add_mimo_p_apoE_e4_carrier. <= 0.05) #T: 7
+
+add_mimo_apoE_df$meta <- rownames(add_mimo_apoE_df)
+
+add_mimo_apoE_df <- add_mimo_apoE_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(add_mimo_apoE_df)
+
+names(add_mimo_apoE_df)[1] <- "p_additive_unadj"
+
+add_mimo_apoE_df <- add_mimo_apoE_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_additive_unajd_mean = mean(p_additive_unadj, na.rm = T))
+
+add_mimo_apoE_df$p_additive_adj <- p.adjust(add_mimo_apoE_df$p_additive_unajd_mean, method = "BH")
+
+add_mimo_apoE_df_sign <- add_mimo_apoE_df %>%
+  filter(p_additive_unajd_mean <= 0.05) #empty
+  
+
+####
+add_mimo_sample_time_df <- data.frame(unlist(add_mimo_p_sample_time))
+table(add_mimo_sample_time_df$unlist.add_mimo_p_sample_time. <= 0.05) #T914
+
+add_mimo_sample_time_df$meta <- rownames(add_mimo_sample_time_df)
+
+add_mimo_sample_time_df <- add_mimo_sample_time_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+  
+names(add_mimo_sample_time_df)[1] <- "p_additive_unadj"
+
+add_mimo_sample_time_df <- add_mimo_sample_time_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_additive_unadj_mean = mean(p_additive_unadj, na.rm = T))
+
+add_mimo_sample_time_df$p_additive_adj <- p.adjust(add_mimo_sample_time_df$p_additive_unadj_mean, method = "BH")
+
+
+
+```
+
+
+assumptions
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        
+        model <- lme(value ~ apoE_e4_carrier + sample_time, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+        #original_out[[j]][[i]] <- original_data
+        #model_out[[j]][[i]] <- model
+        
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+  
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+       
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+```
+
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+WE THUS PROCEED TO UNIVARIATE ASSESSMENTS
+
+```{r}
+
+rm(add_mimo, add_mimo_apoE_df, add_mimo_p_apoE_e4_carrier, add_mimo_sample_time_df,
+   interim, interim2, univar_mimo_sampletime_p_df, i, j, inteirm_plot, violin_additive_plot,
+   violin_data_additive, violin_data_interaction, violin_merge_data_additive, 
+   olink_additive_violin)
+
+```
+
+MIXED MODELS (ADDITIVE)
+```{r}
+
+add_mimo <- list()
+add_mimo_p_apoE_e4_carrier <- list()
+add_mimo_p_sample_time <- list()
+add_mimo_p_age <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names_add[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier + sample_time + Age, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    add_mimo[[j]][[i]] <- interim2
+    
+    add_mimo_p_apoE_e4_carrier[[j]][[i]] <- interim2$tTable[18]
+    
+    add_mimo_p_sample_time[[j]][[i]] <- interim2$tTable[19]
+    
+    add_mimo_p_age[[j]][[i]] <- interim2$tTable[20]
+    
+  
+  }
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+add_mimo_apoE_df <- data.frame(unlist(add_mimo_p_apoE_e4_carrier))
+table(add_mimo_apoE_df$unlist.add_mimo_p_apoE_e4_carrier. <= 0.05) #T: 7
+
+add_mimo_apoE_df$meta <- rownames(add_mimo_apoE_df)
+
+add_mimo_apoE_df <- add_mimo_apoE_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(add_mimo_apoE_df)
+
+names(add_mimo_apoE_df)[1] <- "p_additive_unadj"
+
+add_mimo_apoE_df <- add_mimo_apoE_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_additive_unajd_mean = mean(p_additive_unadj, na.rm = T))
+
+add_mimo_apoE_df$p_additive_adj <- p.adjust(add_mimo_apoE_df$p_additive_unajd_mean, method = "BH")
+
+add_mimo_apoE_df_sign <- add_mimo_apoE_df %>%
+  filter(p_additive_unajd_mean <= 0.05) #empty
+  
+
+####
+add_mimo_sample_time_df <- data.frame(unlist(add_mimo_p_sample_time))
+table(add_mimo_sample_time_df$unlist.add_mimo_p_sample_time. <= 0.05) #T915
+
+add_mimo_sample_time_df$meta <- rownames(add_mimo_sample_time_df)
+
+add_mimo_sample_time_df <- add_mimo_sample_time_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+  
+names(add_mimo_sample_time_df)[1] <- "p_additive_unadj"
+
+add_mimo_sample_time_df <- add_mimo_sample_time_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_additive_unadj_mean = mean(p_additive_unadj, na.rm = T))
+
+add_mimo_sample_time_df$p_additive_adj <- p.adjust(add_mimo_sample_time_df$p_additive_unadj_mean, method = "BH")
+
+
+####
+add_mimo_age_df <- data.frame(unlist(add_mimo_p_age))
+table(add_mimo_age_df$unlist.add_mimo_p_age. <= 0.05) #T106
+
+add_mimo_age_df$meta <- rownames(add_mimo_age_df)
+
+add_mimo_age_df <- add_mimo_age_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+  
+names(add_mimo_age_df)[1] <- "p_additive_unadj"
+
+add_mimo_age_df <- add_mimo_age_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_additive_unadj_mean = mean(p_additive_unadj, na.rm = T))
+
+add_mimo_age_df$p_additive_adj <- p.adjust(add_mimo_age_df$p_additive_unadj_mean, method = "BH")
+
+
+```
+
+assumptions
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        
+        model <- lme(value ~ apoE_e4_carrier + sample_time + Age, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+  
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+       
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+WE THUS PROCEED TO UNIVARIATE ASSESSMENTS
+
+```{r}
+
+rm(add_mimo, add_mimo_apoE_df, add_mimo_p_apoE_e4_carrier, add_mimo_sample_time_df,
+   interim, interim2, univar_mimo_sampletime_p_df, i, j, inteirm_plot, violin_additive_plot,
+   violin_data_additive, violin_data_interaction, violin_merge_data_additive, 
+   olink_additive_violin,
+   add_mimo_age_df, add_mimo_p_age)
+
+```
+
+
+
+MIXED MODELS (UNIVARIATE: APOE E4)
+```{r}
+
+apoe_mimo <- list()
+apoe_mimo_p <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ apoE_e4_carrier, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    apoe_mimo[[j]][[i]] <- interim2
+    
+    apoe_mimo_p[[j]][[i]] <- interim2$tTable[10]
+  
+  }
+  
+  
+}
+
+
+
+```
+
+```{r}
+
+apoe_mimo_df <- data.frame(unlist(apoe_mimo_p))
+
+table(apoe_mimo_df$unlist.apoe_mimo_p. <= 0.05) #T: 7 
+
+```
+
+new 231013 starts
+new 231012 - generalized solution reg assumptions
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        
+        model <- lme(value ~ apoE_e4_carrier, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+    
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+        
+        #original_out[[j]][[i]] <- original_data
+        #model_out[[j]][[i]] <- model
+        
+        
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+  
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+       
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+
+```{r}
+
+apoe_mimo_df$meta <- rownames(apoe_mimo_df)
+
+apoe_mimo_df <- apoe_mimo_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(apoe_mimo_df)
+
+names(apoe_mimo_df)[1] <- "p_univar_unadj"
+
+apoe_mimo_df <- apoe_mimo_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_univar_unadj_mean = mean(p_univar_unadj, na.rm = T))
+
+apoe_mimo_df$p_univar_adj <- p.adjust(apoe_mimo_df$p_univar_unadj_mean, method = "BH")
+
+apoe_mimo_df_sign <- apoe_mimo_df %>%
+  filter(p_univar_unadj_mean <= 0.05) 
+
+apoe_mimo_df_sign #empty
+
+
+```
+
+
+
+MIXED MODELS (UNIVARIATE: TIME)
+```{r}
+
+time_mimo <- list()
+time_mimo_p <- list()
+time_mimo_t <- list()
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+    
+    interim <- list_imputed_long[[i]] %>%
+      filter(olink_protein == j)
+    
+    interim2 <- summary(lme(value ~ sample_time, 
+                    random = ~1 | patientID_use,
+                    data = interim))
+    
+    time_mimo[[j]][[i]] <- interim2
+    
+    time_mimo_p[[j]][[i]] <- interim2$tTable[10]
+    
+    time_mimo_t[[j]][[i]] <- interim2$tTable[8]
+  
+  }
+  
+  
+}
+
+
+
+```
+
+
+```{r}
+
+model_out <- list()
+original_out <- list()
+p_vari <- list()
+p_qq <- list()
+p_corr <- list()
+p_pacf <- list()
+
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_protein_names[1:90]){
+
+        original_data <- list_imputed_long[[i]] %>%
+          filter(olink_protein == j)
+        
+        
+        model <- lme(value ~ sample_time, 
+                    random = ~1 | patientID_use,
+                    data = original_data)
+
+  
+        original_data$fitted <- predict(model)
+        
+        original_data$resid <- residuals(model)
+        
+        
+
+        ##residual vs fitted
+        p1 <- ggplot(original_data, aes(fitted, resid)) + 
+              geom_point() +
+              geom_hline(yintercept = 0) +
+              stat_smooth(method = "loess") +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_vari[[j]][[i]] <- p1
+        
+        
+        
+        ##normality plot for the residuals
+        p2 <- ggplot(original_data, aes(sample = resid)) +
+              stat_qq() + stat_qq_line() +
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_qq[[j]][[i]] <- p2
+        
+          
+        
+        ##corr fitted vs observed
+        p3 <- ggplot(original_data, aes(fitted, value)) +
+              geom_point() +
+              stat_smooth(method = "loess") + 
+              theme_minimal() +
+              ggtitle(paste(j, i))
+        
+        p_corr[[j]][[i]] <- p3
+        
+        
+        library(forecast)
+
+        p4 <- ggtsdisplay(original_data$resid)
+        
+        p_pacf[[j]][[i]] <- p4
+        
+  
+    
+  }
+  
+  
+  
+
+}
+
+
+
+```
+
+
+save all files
+```{r}
+
+library(gridExtra)
+
+p_vari_s <- FlattenListofGgplot(p_vari)
+
+p_qq_s <- FlattenListofGgplot(p_qq)
+
+p_corr_s <- FlattenListofGgplot(p_corr)
+
+p_pacf_s <- FlattenListofGgplot(p_pacf)
+
+
+
+```
+
+```{r}
+
+rm(p1, p2, p3, p4, p_vari, p_vari_s, p_qq, p_qq_s, p_corr, p_corr_s, p_pacf, p_pacf_s, original_out, model_out,
+   original_data, model)
+
+```
+
+
+```{r}
+
+time_mimo_df <- data.frame(unlist(time_mimo_p))
+table(time_mimo_df$unlist.time_mimo_p. <= 0.05) 
+time_mimo_df$meta <- rownames(time_mimo_df)
+
+
+time_mimo_df_t <- data.frame(unlist(time_mimo_t))
+time_mimo_df_t$meta <- rownames(time_mimo_df_t)
+
+time_mimo_df <- full_join(time_mimo_df, time_mimo_df_t, by = "meta")
+
+
+```
+
+
+
+```{r}
+
+
+time_mimo_df <- time_mimo_df %>%
+  separate(meta, into = c("olink_protein", "imputation_index"), sep = "\\.")
+
+head(time_mimo_df)
+
+names(time_mimo_df)[1] <- "p_time_unadj"
+names(time_mimo_df)[4] <- "t_value"
+
+time_mimo_df <- time_mimo_df %>%
+  group_by(olink_protein) %>%
+  summarise(p_time_unadj_mean = mean(p_time_unadj, na.rm = T),
+            t_time_mean = mean(t_value, na.rm = T))
+
+time_mimo_df$p_time_adj <- p.adjust(time_mimo_df$p_time_unadj_mean, method = "BH") 
+
+time_mimo_df_sign <- time_mimo_df %>%
+  filter(p_time_unadj_mean <= 0.05)
+
+time_mimo_df_sign <- time_mimo_df_sign[, c(1, 3, 2, 4)]
+
+
+length(unique(time_mimo_df_sign$olink_protein[time_mimo_df_sign$p_time_unadj_mean <= 0.05])) #41
+length(unique(time_mimo_df_sign$olink_protein[time_mimo_df_sign$p_time_adj <= 0.05])) #34
+
+
+```
+
+
+compare against OLD time dependent vars
+```{r}
+
+old_univar_time_mimo_df <- read.csv("./output/draft/regressions/univar_time_231031_CL.csv")
+
+old_univar_time_mimo_df <- old_univar_time_mimo_df[, 2:4]
+
+old_univar_time_mimo_df_sign <- old_univar_time_mimo_df %>%
+  filter(p_time_unadj_mean <= 0.05)
+
+setdiff(time_mimo_df_sign$olink_protein, old_univar_time_mimo_df_sign$olink_protein) #[1] "Abeta_40" "DKK_4"  (unique in the new df) 
+setdiff(old_univar_time_mimo_df_sign$olink_protein, time_mimo_df_sign$olink_protein) #empty
+
+#hence - two more proteins are added following the new imputations
+
+
+```
+
+graphical illustration 
+```{r}
+
+violin_data_time <- list()
+
+olink_time_violin <- unique(time_mimo_df_sign$olink_protein)
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_time_violin[1:41]){
+      #note length(olink_time_violin) == 41 with updated imputations
+    
+      interim <- list_imputed_long[[i]] %>%
+        filter(olink_protein == j)
+      
+      violin_data_time[[j]][[i]] <- interim
+      
+      violin_data_time[[j]][[i]]$imputation_index <- i 
+    
+  }
+  
+}
+
+
+
+```
+
+```{r}
+rm(interim, interim2)
+```
+
+```{r}
+
+violin_merge_data_time <- list()
+violin_time_plot <- list()
+
+for(i in olink_time_violin[1:41]){
+  
+  interim <- bind_rows(violin_data_time[[i]])
+  
+  interim2 <- interim %>%
+    group_by(Social.Security.Number, sample_time) %>%
+    mutate(mean_value = mean(value, na.rm = T))
+  
+  interim2 <- interim2 %>%
+    dplyr::select(-c(imputation_index, value))
+  
+  interim2 <- distinct(interim2)
+  
+  violin_merge_data_time[[i]] <- interim2
+
+  interim_plot <- ggplot(interim2, aes(sample_time, mean_value, fill = as.factor(sample_time))) +
+  geom_violin(width = .75, alpha = .2, position = position_dodge(width = 0.75)) +
+  geom_boxplot(width = .2, color = "grey", alpha = .4, position = position_dodge(width = 0.75)) +
+  geom_point(pch = 21, size = 4, position = position_jitterdodge(jitter.width = .3)) +
+  scale_fill_viridis_d() +
+  theme_linedraw() +
+  xlab("Sample time") + ylab("Protein quantification level") + ggtitle(paste0("OLINK protein: ", i))
+  
+  violin_time_plot[[i]] <- interim_plot
+  
+  
+}
+
+```
+
+```{r}
+
+rm(interim, interim2)
+
+```
+
+```{r}
+
+violin_merge_data_time_supp <- list()
+violin_time_plot_supp <- list()
+
+for(i in olink_time_violin[1:41]){
+  
+  interim_supp <- bind_rows(violin_data_time[[i]])
+  
+  interim2_supp <- interim_supp %>%
+    group_by(Social.Security.Number, sample_time) %>%
+    mutate(mean_value = mean(value, na.rm = T))
+  
+  interim2_supp <- interim2_supp %>%
+    dplyr::select(-c(imputation_index, value))
+  
+  interim2_supp <- distinct(interim2_supp)
+  
+  interim3_supp <- interim2_supp %>%
+  filter(sample_time == "d1") %>%
+  mutate(day1_value = mean_value) %>%
+  dplyr::select(c(patientID_use, day1_value))
+  
+  interim2_supp <- left_join(interim2_supp, interim3_supp, by = "patientID_use")
+  
+  interim2_supp <- interim2_supp %>%
+  dplyr::select(-c(Social.Security.Number.y, sample_time.y))
+  
+  names(interim2_supp)[names(interim2_supp) == "sample_time.x"] <- "sample_time"
+  
+  interim2_supp$value_norm <- interim2_supp$mean_value/interim2_supp$day1_value
+
+  interim2_supp$sample_time_numeric <- if_else(interim2_supp$sample_time == "d1", 1, 3)
+  
+  violin_merge_data_time_supp[[i]] <- interim2_supp
+
+  interim_plot_supp <- ggplot(interim2_supp, aes(sample_time_numeric, value_norm)) +
+  geom_point(pch = 21, size = 4, fill = "gray") +
+  geom_line(aes(group = as.factor(patientID_use)), col = "gray") + 
+  geom_smooth(method = "loess", col = "#440154", se = F) +
+  labs(x = "Sample time",
+       y = "Normalized protein concentration") +
+  ggtitle(paste0("OLINK protein: ", i)) +
+  theme_minimal()
+  
+  violin_time_plot_supp[[i]] <- interim_plot_supp
+  
+  
+}
+
+
+time_plot_supp <- FlattenListofGgplot(violin_time_plot_supp)
+
+
+
+
+```
+
+
+```{r}
+rm(interim, interim_plot, interim2, 
+   time_mimo, time_mimo_df, time_mimo_df_sign, time_mimo_p, 
+   violin_data_time, violin_merge_data_time, violin_time_plot,
+   i, j, olink_protein_names_add, olink_time_violin,
+   grid, add_mimo_apoE_df, add_mimo_apoE_df_sign, add_mimo_p_sample_time,
+   apoe_mimo, apoe_mimo_df, apoe_mimo_df_sign, apoe_mimo_p)
+
+```
+
+
+graphical illustration neurodegenerative proteins
+231208: updated to also include MAPT
+
+```{r}
+
+violin_data_time <- list()
+
+olink_neurodegen_violin <- c("Abeta_38", "Abeta_40", "Abeta_42", "Abeta42_40_ratio", "MAPT")
+
+for(i in names(list_imputed_long)[1:20]){
+  
+  for(j in olink_neurodegen_violin[1:5]){
+    
+      interim <- list_imputed_long[[i]] %>%
+        filter(olink_protein == j)
+      
+      violin_data_time[[j]][[i]] <- interim
+      
+      violin_data_time[[j]][[i]]$imputation_index <- i 
+    
+  }
+  
+}
+
+
+
+```
+
+
+```{r}
+rm(interim, i, j)
+```
+
+```{r}
+
+violin_merge_data_time <- list()
+violin_time_plot <- list()
+
+for(i in olink_neurodegen_violin[1:5]){
+  
+  interim <- bind_rows(violin_data_time[[i]])
+  
+  interim2 <- interim %>%
+    group_by(Social.Security.Number, sample_time) %>%
+    mutate(mean_value = mean(value, na.rm = T))
+  
+ interim2 <- interim2 %>%
+   dplyr::select(-c(imputation_index, value))
+ 
+ interim2 <- distinct(interim2)
+ 
+ violin_merge_data_time[[i]] <- interim2
+
+ interim_plot <- ggplot(interim2, aes(as.character(apoE_e4_carrier), mean_value, fill = as.factor(sample_time))) +
+ geom_violin(width = .75, alpha = .2, position = position_dodge(width = 0.75)) +
+ geom_boxplot(width = .2, color = "grey", alpha = .4, position = position_dodge(width = 0.75)) +
+ geom_point(pch = 21, size = 4, position = position_jitterdodge(jitter.width = .3)) +
+ scale_fill_viridis_d() +
+ theme_linedraw() +
+ xlab("APOE e4 carrier") + ylab("Protein quantification level") + ggtitle(paste0("OLINK protein: ", i))
+ 
+ violin_time_plot[[i]] <- interim_plot
+  
+  
+}
+
+```
+
+
+```{r}
+
+print(Sys.time())
+print("all code run")
+
+
+```
+
+
+
+
